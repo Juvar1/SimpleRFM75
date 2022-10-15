@@ -167,12 +167,12 @@ public:
   };
 
   enum txPower {
-    POWER4,
-    POWER1,
-    POWER7,
-    POWER12,
-    POWER18,
-    POWER25
+    POWER_PLUS4,
+    POWER_MINUS1,
+    POWER_MINUS7,
+    POWER_MINUS12,
+    POWER_MINUS18,
+    POWER_MINUS25
   };
 
   enum dataRate {
@@ -181,6 +181,7 @@ public:
     DATA250K
   };
 
+  // Device init sequence // needs to be done only once at beginning
   inline void init(uint8_t ce_pin, uint8_t csn_pin) {
     ce = ce_pin;
     csn = csn_pin;
@@ -202,6 +203,7 @@ public:
     _delay_ms(1);
   }
 
+  // In manual controlling set device mode
   inline void setMode(deviceMode mode) {
     switch (mode) {
     case POWEROFF:
@@ -223,7 +225,10 @@ public:
     }
   }
 
-  inline void send(uint8_t *data, uint8_t length) {
+  // Send message without auto ack
+  inline void sendNoAck(uint8_t *data, uint8_t length) {
+    if (length > 32) return;
+
     setMode(TRANSMIT);
     // wait until tx buffer is free
     while (rwByte(0x17 & 0x20)) {
@@ -235,23 +240,42 @@ public:
     setMode(RECEIVE);
   }
 
+  // Send auto acked message with selected pipe
+  inline void send(uint8_t pipe, uint8_t *data, uint8_t length) {
+    if (pipe > 5 || length > 32) return;
+
+    setMode(TRANSMIT);
+    // wait until tx buffer is free
+    while (rwByte(0x17 & 0x20)) {
+      uint8_t sta = rwByte(REGISTER_STATUS);
+      if (sta & 0x10) goTransmit();
+    }
+    // transmit
+    rwBytes(0xa8 | pipe, data, length);
+    setMode(RECEIVE);
+  }
+
+  // Get available bytes count from receive buffer
   inline uint8_t available(void) {
     uint8_t sta = (rwByte(REGISTER_STATUS) >> 1) & 0x07;
     if (sta == 0x07) return 0;
     return rwByte(0x60);
   }
 
+  // Read a byte from receive buffer
   inline uint8_t read(void) {
     return rwByte(0x61);
   }
 
+  // Returns pipe number where data is available
   inline uint8_t availableFromPipe(void) {
     uint8_t sta = (rwByte(REGISTER_STATUS) >> 1) & 0x07;
     if (sta == 0x07) return 0;
     return sta;
   }
 
-  // remember to clear irq after use
+  // Enable receive interrupt
+  // Remember to clear interrupts after use
   inline void setRxInterrupt(uint8_t enable) {
     uint8_t irq = rwByte(0);
     irq &= ~(1 << 6);
@@ -259,12 +283,14 @@ public:
     rwByte(REGISTER_WRITE, irq);
   }
 
+  // Clear all interrupts
   inline void clearInterrupts(void) {
     uint8_t ints = rwByte(0x07);
     ints |= ((1 << 4) | (1 << 5) | (1 << 6));
     rwByte(REGISTER_WRITE | 0x07, ints);
   }
 
+  // Set common transmit address
   // LSB first
   inline void setTxAddress(uint8_t *addr) {
     // get address width
@@ -273,8 +299,11 @@ public:
     rwBytes(REGISTER_WRITE | 0x10, addr, width);
   }
 
+  // Set receive address to pipe
   // LSB first
   inline void setRxAddress(uint8_t pipe, uint8_t *addr) {
+    if (pipe > 5) return;
+    
     // get address width
     uint8_t width = rwByte(0x03);
     width += 2;
@@ -282,13 +311,17 @@ public:
     else rwBytes(REGISTER_WRITE | (0x0a + pipe), addr, width);
   }
 
+  // Set length or disable CRC
+  // Valid values 0...2
   inline void setCrcLength(uint8_t length) {
     uint8_t crc = rwByte(0);
     crc &= ~(0x08 | 0x04); // clear CRC_EN and CRC0
     switch (length) {
+      default:
       case 0:
         // disable also Auto ACK from all pipes
         rwByte(REGISTER_WRITE | 0x01, 0);
+        disableAutoAck();
         rwByte(REGISTER_WRITE, crc);
         break;
       case 2:
@@ -301,15 +334,27 @@ public:
     }
   }
 
-  inline void setAutoAck(uint8_t enable) {
+  // Disable auto aknowledge feature from all pipes
+  inline void disableAutoAck(void) {
     uint8_t feature = rwByte(0x1d);
     feature &= ~0x02;
-    if (enable) feature |= 0x02;
-    // enable/disable also Auto ACK from all pipes
-    rwByte(REGISTER_WRITE | 0x01, enable | (enable << 1) | (enable << 2) |(enable << 3) | (enable << 4) | (enable << 5));
+    rwByte(REGISTER_WRITE | 0x1d, feature);
+  }
+  
+  // Set auto acknowledge feature to pipe
+  inline void setAutoAck(uint8_t pipe, uint8_t enable) {
+    if (pipe > 5) return;
+
+    uint8_t feature = rwByte(0x1d);
+    uint8_t pipeAA = rwByte(0x01);
+    feature |= 0x02;
+    pipeAA &= ~(1 << pipe);
+    if (enable) pipeAA |= (1 << pipe);
+    rwByte(REGISTER_WRITE | 0x01, pipeAA);
     rwByte(REGISTER_WRITE | 0x1d, feature);
   }
  
+  // Set transmitter power
   inline void setTxPower(txPower level) {
     uint8_t rfSetup = rwByte(0x06);
     uint8_t txiCtrl = 0;
@@ -317,25 +362,25 @@ public:
     rfSetup &= ~0x06; // clear RF_PWR bits
     switch (level) {
       default:
-      case POWER4: // +4 dBm
+      case POWER_PLUS4: // +4 dBm
         txiCtrl = 7;
         rfSetup |= (3 << 1);
         break;
-      case POWER1: // -1 dBm
+      case POWER_MINUS1: // -1 dBm
         rfSetup |= (3 << 1);
         break;
-      case POWER7: // -7 dBm
+      case POWER_MINUS7: // -7 dBm
         rfSetup |= (2 << 1);
         break;
-      case POWER12: // -12 dBm
+      case POWER_MINUS12: // -12 dBm
         txiCtrl = 2;
         rfSetup |= (1 << 1);
         break;
-      case POWER18: // -18 dBm
+      case POWER_MINUS18: // -18 dBm
         txiCtrl = 3;
         rfSetup |= (1 << 1);
         break;
-      case POWER25: // -25 dBm
+      case POWER_MINUS25: // -25 dBm
         // all zeroes
         break;
     }
@@ -346,6 +391,8 @@ public:
     rwByte(CMD_ACTIVATE, 0x53); // switch to bank 0
   }
 
+  // Enable or disable LNA
+  // enable == true is +20dBm
   inline void setLnaGain(uint8_t enable) {
     uint8_t rfSetup = rwByte(0x06);
     rfSetup &= ~0x01;
@@ -353,6 +400,7 @@ public:
     rwByte(REGISTER_WRITE | 0x06, rfSetup);
   }
 
+  // Set datarate
   inline void setDatarate(dataRate rate) {
     uint8_t rfSetup = rwByte(0x06);
     rfSetup &= ~(0x08 | 0x20);
@@ -371,27 +419,71 @@ public:
     rwByte(REGISTER_WRITE | 0x06, rfSetup);
   }
 
+  // Set receive pipe
   inline void setRxPipe(uint8_t pipe, uint8_t enable) {
+    if (pipe > 5) return;
+
     uint8_t enRx = rwByte(0x02);
     enRx &= ~(1 << pipe);
     if (enable) enRx |= (1 < pipe);
     rwByte(REGISTER_WRITE | 0x02, enRx);
   }
 
-  inline void setRfChannel(uint8_t channel) {
-    rwByte(REGISTER_WRITE | 0x05, channel);
+  // Set RF frequency in 1MHz steps
+  // Legal range is 2400...2483MHz
+  // 2400 + freq = MHz
+  inline void setRfFreq(uint8_t freq) {
+    if (freq > 83) return;
+
+    rwByte(REGISTER_WRITE | 0x05, freq);
   }
 
-  inline void setRetry(uint8_t count, uint8_t delay) {
-    rwByte(REGISTER_WRITE | 0x04, count | (delay << 4));
+  // Set automatic retry settings
+  // count == 0 disable retry
+  // delay = 250...4000us in 250us steps
+  inline void setRetry(uint8_t count, uint16_t delay_us) {
+    delay_us /= 266;
+    if (count > 15 || delay > 15) return;
+
+    rwByte(REGISTER_WRITE | 0x04, count | (delay_us << 4));
   }
 
+  // Set address width for all pipes
   inline void setAddrWidth(uint8_t width) {
+    if (width < 3 || width > 5) return;
+    
     rwByte(REGISTER_WRITE | 0x03, width - 2);
   }
 
+  // Set receive payload size for pipe
   inline void setRxPayloadSize(uint8_t pipe, uint8_t size) {
+    if (pipe > 5 || size < 1 || size > 32) return;
+
     rwByte(REGISTER_WRITE | (0x11 + pipe), size);
+  }
+
+  // Disable dynamic payload length from all pipes
+  inline void disableDynamicPayload(void) {
+    uint8_t dpl = rwByte(0x1d);
+    dpl &= ~(0x04);
+    rwByte(REGISTER_WRITE | 0x1d, dpl);
+  }
+
+  // Set dynamic payload with auto ack to pipe
+  inline void setDynamicPayload(uint8_t pipe, uint8_t enable) {
+    if (pipe > 5) return;
+
+    uint8_t pipeAA = rwByte(0x01);
+    uint8_t pipeDp = rwByte(0x1c);
+    uint8_t dplBit = rwByte(0x1d);
+    pipeAA &= ~(1 << pipe);
+    dplBit |= (0x04);
+    pipeDp &= ~(1 << pipe);
+    if (enable) pipeDp |= (1 << pipe);
+    if (enable) pipeAA |= (1 << pipe);
+    rwByte(REGISTER_WRITE | 0x01, pipeAA);
+    rwByte(REGISTER_WRITE | 0x1d, dplBit);
+    rwByte(REGISTER_WRITE | 0x1c, pipeDp);
   }
 
 };
